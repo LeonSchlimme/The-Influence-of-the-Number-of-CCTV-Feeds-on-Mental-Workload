@@ -1,0 +1,930 @@
+---
+title: "Questionnaire Analysis"
+format: html
+---
+
+# Analysis of NASA-TLX Scores
+
+## Libraries
+
+```{r}
+library(tidyverse)
+library(knitr)
+library(readxl)
+library(rstatix)
+library(ggpubr)
+library(effectsize)
+library(Matrix)
+library(lme4)
+library(car)
+library(modelr)
+```
+
+## Data Preparation 
+
+The questionnaire data was imported from an excel spreadsheet, which was used to store all questionnaire data
+
+```{r}
+
+# Read tables
+
+data_tlx <- read_xlsx("D:/VHP files/Questionnaire Answeres/Questionnaire_Analysis.xlsx", sheet = "Analysis TLX")
+
+data_pairwise<- read_xlsx("D:/VHP files/Questionnaire Answeres/Questionnaire_Analysis.xlsx", sheet = "Analysis Pairwise")
+
+# Join tables
+
+data_questionnaires <- inner_join(data_tlx, data_pairwise, by = 
+                                    "Participant_Number")
+# Make edits to columns                                  
+
+data_questionnaires <- data_questionnaires %>% 
+  mutate(Participant_Number = as.character(Participant_Number),  
+    Condition_Number = as.factor(Condition_Number),
+    Participant_Number = case_when(
+      Participant_Number == "3" ~ "03",
+      Participant_Number == "7" ~ "07",
+      # make sure the rest of the numbers stay the same
+      TRUE ~ Participant_Number))
+
+glimpse(data_questionnaires)
+
+```
+
+## General MW and Subscale Scores
+
+```{r}
+
+# Adjusted ratings
+
+data_questionnaires <- data_questionnaires %>% 
+  mutate(AR_Mental_Demand = Score_Mental_Demand*Weight_Mental_Demand,
+         AR_Physical_Demand = Score_Physical_Demand*Weight_Physical_Demand,
+         AR_Temporal_Demand = Score_Temporal_Demand*Weight_Temporal_Demand,
+         AR_Performance = Score_Performance*Weight_Performance,
+         AR_Effort = Score_Effort*Weight_Effort,
+         AR_Frustration = Score_Frustration*Weight_Frustration)
+  
+glimpse(data_questionnaires)
+
+# General MW score
+
+data_questionnaires <- data_questionnaires %>% 
+  mutate(Score_MW = (AR_Mental_Demand + AR_Physical_Demand + AR_Temporal_Demand + AR_Performance + AR_Effort + AR_Frustration)/15)
+
+# Add experiment location for later analysis
+
+data_questionnaires <- data_questionnaires %>% 
+  mutate(Experiment_Location = case_when(
+    Participant_Number %in% c("47", "60", "03") ~ 1,
+    Participant_Number %in% c("13", "21", "52", "33", "75", "59") ~ 2,
+    Participant_Number %in% c("98", "85", "19", "27", "36", "42") ~ 3,
+    Participant_Number == "07" ~ 4))
+
+# Save the data for the eye tracking analysis.
+
+glimpse(data_questionnaires)
+write.csv(data_questionnaires,"Questionnaire_Data.csv", row.names = FALSE)
+
+```
+
+## General MW
+
+### Descriptive Statistics for MW
+
+```{r}
+
+# Median and IQR for general MW scores
+
+data_questionnaires %>% 
+  group_by(Condition_Number) %>% 
+  summarize(Mdn = median(Score_MW),
+            Q1 = quantile(Score_MW, probs=0.25),
+            Q3 = quantile(Score_MW, probs=0.75)) %>% 
+  as.data.frame()
+
+# Boxplot 
+
+data_questionnaires %>% 
+  ggplot(aes(as_factor(Condition_Number), Score_MW)) +
+  theme_minimal()+
+  geom_boxplot(outlier.color = "red", outlier.shape = 16, outlier.size = 1) +
+  scale_x_discrete(labels = c("1" = "8", "2" = "16", "3" = "24")) +
+  scale_y_continuous(limits = c(0, 100)) +
+  labs(x = "Number of CCTV-images",y = "NASA-TLX score")+
+  theme(
+    text = element_text(family = "serif"),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    ) 
+
+```
+
+### Linear mixed effects model for MW
+
+```{r}
+
+# Create ranks for MW score
+
+data_questionnaires<- data_questionnaires %>% 
+  mutate(rank_mw = rank(Score_MW))
+
+
+modelmw <- data_questionnaires %>% 
+  lmer(rank_mw ~ Condition_Number + Sleepiness #+ Experiment_Location 
+       + (1|Participant_Number), data = .)
+
+modelmw
+
+# check normality by adding residuals and checking them
+
+
+data_questionnaires %>% 
+  add_residuals(modelmw) %>% 
+  ggplot(aes(x = resid)) +
+  geom_histogram(bins=20) +
+  # facet wrap is needed when checking residuals for each subgroup
+  facet_wrap(~ Condition_Number)
+
+# Q-Q Plot
+
+data_questionnaires %>% 
+  add_residuals(modelmw) %>% 
+  ggqqplot("resid", facet.by = "Condition_Number")
+
+# Shapiro-Wilk for every group 
+
+data_questionnaires %>%
+  add_residuals(modelmw) %>% 
+  group_by(Condition_Number) %>%
+  shapiro_test(resid)
+
+# Compare predicted scores based on model with residuals 
+
+data_questionnaires %>% 
+  add_residuals(modelmw) %>% 
+  add_predictions(modelmw) %>% 
+  ggplot(aes(x = pred, y = resid)) + 
+  geom_point()
+
+# Check residuals plotted with condition on the x-axis 
+
+data_questionnaires %>% 
+  add_residuals(modelmw) %>% 
+  ggplot(aes(x = Condition_Number, y = resid)) + 
+  geom_boxplot()
+
+# Check normality of random effects
+
+# Get random effects
+
+ranef_mw_values<- ranef(modelmw)$Participant_Number[,1]
+ranef_mw <- data.frame(ranef_mw = ranef_mw_values)
+
+# Q-Q Plot and test of normality
+
+ranef_mw %>% 
+  ggqqplot("ranef_mw")
+
+ranef_mw %>%
+  shapiro_test(ranef_mw)
+
+# Check model 
+
+summary(modelmw)
+
+# now run an ANOVA
+
+data_questionnaires %>% 
+  lmer(rank_mw~Condition_Number + Sleepiness #+ Experiment_Location 
+       + (1|Participant_Number), data = .) %>% 
+  Anova(type = 3, test.statistic = "F")
+
+# Effect size
+
+data_questionnaires %>% 
+  lmer(rank_mw~Condition_Number + Sleepiness #+ Experiment_Location 
+       + (1|Participant_Number), data = .) %>% 
+  Anova(type = 3, test.statistic = "F") %>% 
+  eta_squared(modelmw)
+
+```
+
+## Mental Demand
+
+### Descriptive Statistics for Mental Demand
+
+```{r}
+
+# Median and IQR for Mental Demand Scores
+
+data_questionnaires %>% 
+  group_by(Condition_Number) %>% 
+  summarize(Mdn = median(Score_Mental_Demand),
+            Q1 = quantile(Score_Mental_Demand, probs=0.25),
+            Q3 = quantile(Score_Mental_Demand, probs=0.75)) %>% 
+  as.data.frame()
+
+# Boxplot 
+
+data_questionnaires %>% 
+  ggplot(aes(as_factor(Condition_Number), Score_Mental_Demand)) +
+  theme_minimal()+
+  geom_boxplot(outlier.color = "red", outlier.shape = 16, outlier.size = 1) +
+  scale_x_discrete(labels = c("1" = "8", "2" = "16", "3" = "24")) +
+  scale_y_continuous(limits = c(0, 100)) +
+  labs(x = "Number of CCTV-images",y = "Mental Demand Score")+
+  theme(
+    text = element_text(family = "serif"),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    ) 
+
+```
+
+### Linear Mixed Effects Model for Mental Demand
+
+```{r}
+
+# Create ranks for Mental Demand score
+
+data_questionnaires <- data_questionnaires %>% 
+  mutate(rank_md = rank(Score_Mental_Demand))
+
+modelmd <- data_questionnaires %>% 
+  lmer(rank_md ~ Condition_Number + Sleepiness + (1|Participant_Number), data = .)
+
+modelmd
+
+# Check normality by adding residuals and checking them
+
+data_questionnaires %>% 
+  add_residuals(modelmd) %>% 
+  ggplot(aes(x = resid)) +
+  geom_histogram(bins=20) +
+  facet_wrap(~ Condition_Number)
+
+# Q-Q Plot
+
+data_questionnaires %>% 
+  add_residuals(modelmd) %>% 
+  ggqqplot("resid", facet.by = "Condition_Number")
+
+# Shapiro-Wilk for every group 
+
+data_questionnaires %>%
+  add_residuals(modelmd) %>% 
+  group_by(Condition_Number) %>%
+  shapiro_test(resid)
+
+# Compare predicted scores based on model with residuals 
+
+data_questionnaires %>% 
+  add_residuals(modelmd) %>% 
+  add_predictions(modelmd) %>% 
+  ggplot(aes(x = pred, y = resid)) + 
+  geom_point()
+
+# Check residuals plotted with condition on the x-axis 
+
+data_questionnaires %>% 
+  add_residuals(modelmd) %>% 
+  ggplot(aes(x = Condition_Number, y = resid)) + 
+  geom_boxplot()
+
+# Check normality of random effects
+
+# Get random effects
+
+ranef_md_values <- ranef(modelmd)$Participant_Number[,1]
+ranef_md <- data.frame(ranef_md = ranef_md_values)
+
+# Q-Q Plot and test of normality
+
+ranef_md %>% 
+  ggqqplot("ranef_md")
+
+ranef_md %>%
+  shapiro_test(ranef_md)
+
+# Check model 
+
+summary(modelmd)
+
+# Run ANOVA
+
+data_questionnaires %>% 
+  lmer(rank_md ~ Condition_Number + Sleepiness + (1|Participant_Number), data = .) %>% 
+  Anova(type = 3, test.statistic = "F")
+
+# Effect size
+
+data_questionnaires %>% 
+  lmer(rank_md ~ Condition_Number + Sleepiness + (1|Participant_Number), data = .) %>% 
+  Anova(type = 3, test.statistic = "F") %>% 
+  eta_squared(modelmd)
+```
+
+## Physical Demand
+
+### Descriptive Statistics for Physical Demand
+
+```{r}
+
+# Median and IQR for Physical Demand Scores
+
+data_questionnaires %>% 
+  group_by(Condition_Number) %>% 
+  summarize(Mdn = median(Score_Physical_Demand),
+            Q1 = quantile(Score_Physical_Demand, probs=0.25),
+            Q3 = quantile(Score_Physical_Demand, probs=0.75)) %>% 
+  as.data.frame()
+
+# Boxplot 
+
+data_questionnaires %>% 
+  ggplot(aes(as_factor(Condition_Number), Score_Physical_Demand)) +
+  theme_minimal()+
+  geom_boxplot(outlier.color = "red", outlier.shape = 16, outlier.size = 1) +
+  scale_x_discrete(labels = c("1" = "8", "2" = "16", "3" = "24")) +
+  scale_y_continuous(limits = c(0, 100)) +
+  labs(x = "Number of CCTV-images", y = "Physical Demand Score")+
+  theme(
+    text = element_text(family = "serif"),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+  ) 
+
+```
+
+### Linear Mixed Effects Model for Physical Demand
+
+```{r}
+
+# Create ranks for Physical Demand score
+
+data_questionnaires <- data_questionnaires %>% 
+  mutate(rank_pd = rank(Score_Physical_Demand))
+
+modelpd <- data_questionnaires %>% 
+  lmer(rank_pd ~ Condition_Number + Sleepiness + (1|Participant_Number), data = .)
+
+modelpd
+
+# check normality by adding residuals and checking them
+
+data_questionnaires %>% 
+  add_residuals(modelpd) %>% 
+  ggplot(aes(x = resid)) +
+  geom_histogram(bins=20) +
+  facet_wrap(~ Condition_Number)
+
+# Q-Q Plot
+
+data_questionnaires %>% 
+  add_residuals(modelpd) %>% 
+  ggqqplot("resid", facet.by = "Condition_Number")
+
+# Shapiro-Wilk for every group 
+
+data_questionnaires %>%
+  add_residuals(modelpd) %>% 
+  group_by(Condition_Number) %>%
+  shapiro_test(resid)
+
+# Compare predicted scores based on model with residuals 
+
+data_questionnaires %>% 
+  add_residuals(modelpd) %>% 
+  add_predictions(modelpd) %>% 
+  ggplot(aes(x = pred, y = resid)) + 
+  geom_point()
+
+# Check residuals plotted with condition on the x-axis 
+
+data_questionnaires %>% 
+  add_residuals(modelpd) %>% 
+  ggplot(aes(x = Condition_Number, y = resid)) + 
+  geom_boxplot()
+
+# Check normality of random effects
+
+# Get random effects
+
+ranef_pd_values <- ranef(modelpd)$Participant_Number[,1]
+ranef_pd <- data.frame(ranef_pd = ranef_pd_values)
+
+# Q-Q Plot and test of normality
+
+ranef_pd %>% 
+  ggqqplot("ranef_pd")
+
+ranef_pd %>%
+  shapiro_test(ranef_pd)
+
+# Check model 
+
+summary(modelpd)
+
+# now run an ANOVA
+
+data_questionnaires %>% 
+  lmer(rank_pd ~ Condition_Number + Sleepiness + (1|Participant_Number), data = .) %>% 
+  Anova(type = 3, test.statistic = "F")
+
+# Effect size
+
+data_questionnaires %>% 
+  lmer(rank_pd ~ Condition_Number + Sleepiness + (1|Participant_Number), data = .) %>% 
+  Anova(type = 3, test.statistic = "F") %>% 
+  eta_squared(modelpd)
+
+```
+
+## Temporal Demand
+
+### Descriptive Statistics for Temporal Demand
+
+```{r}
+
+# Median and IQR for Temporal Demand Scores
+
+data_questionnaires %>% 
+  group_by(Condition_Number) %>% 
+  summarize(Mdn = median(Score_Temporal_Demand),
+            Q1 = quantile(Score_Temporal_Demand, probs=0.25),
+            Q3 = quantile(Score_Temporal_Demand, probs=0.75)) %>% 
+  as.data.frame()
+
+# Boxplot 
+
+data_questionnaires %>% 
+  ggplot(aes(as_factor(Condition_Number), Score_Temporal_Demand)) +
+  theme_minimal()+
+  geom_boxplot(outlier.color = "red", outlier.shape = 16, outlier.size = 1) +
+  scale_x_discrete(labels = c("1" = "8", "2" = "16", "3" = "24")) +
+  scale_y_continuous(limits = c(0, 100)) +
+  labs(x = "Number of CCTV-images", y = "Temporal Demand Score")+
+  theme(
+    text = element_text(family = "serif"),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+  ) 
+
+```
+
+### Linear Mixed Effects Model for Temporal Demand
+
+```{r}
+
+# Create ranks for Temporal Demand score
+
+data_questionnaires <- data_questionnaires %>% 
+  mutate(rank_td = rank(Score_Temporal_Demand))
+
+modeltd <- data_questionnaires %>% 
+  lmer(rank_td ~ Condition_Number + Sleepiness + (1|Participant_Number), data = .)
+
+modeltd
+
+# check normality by adding residuals and checking them
+
+data_questionnaires %>% 
+  add_residuals(modeltd) %>% 
+  ggplot(aes(x = resid)) +
+  geom_histogram(bins=20) +
+  facet_wrap(~ Condition_Number)
+
+# Q-Q Plot
+
+data_questionnaires %>% 
+  add_residuals(modeltd) %>% 
+  ggqqplot("resid", facet.by = "Condition_Number")
+
+# Shapiro-Wilk for every group 
+
+data_questionnaires %>%
+  add_residuals(modeltd) %>% 
+  group_by(Condition_Number) %>%
+  shapiro_test(resid)
+
+# Compare predicted scores based on model with residuals 
+
+data_questionnaires %>% 
+  add_residuals(modeltd) %>% 
+  add_predictions(modeltd) %>% 
+  ggplot(aes(x = pred, y = resid)) + 
+  geom_point()
+
+# Check residuals plotted with condition on the x-axis 
+
+data_questionnaires %>% 
+  add_residuals(modeltd) %>% 
+  ggplot(aes(x = Condition_Number, y = resid)) + 
+  geom_boxplot()
+
+# Check normality of random effects
+
+# Get random effects
+
+ranef_td_values <- ranef(modeltd)$Participant_Number[,1]
+ranef_td <- data.frame(ranef_td = ranef_td_values)
+
+# Q-Q Plot and test of normality
+
+ranef_td %>% 
+  ggqqplot("ranef_td")
+
+ranef_td %>%
+  shapiro_test(ranef_td)
+
+# Check model 
+
+summary(modeltd)
+
+# now run an ANOVA
+
+data_questionnaires %>% 
+  lmer(rank_td ~ Condition_Number + Sleepiness + (1|Participant_Number), data = .) %>% 
+  Anova(type = 3, test.statistic = "F")
+
+# Effect size
+
+data_questionnaires %>% 
+  lmer(rank_td ~ Condition_Number + Sleepiness + (1|Participant_Number), data = .) %>% 
+  Anova(type = 3, test.statistic = "F") %>% 
+  eta_squared(modeltd)
+```
+
+## Effort
+
+### Descriptive Statistics Effort
+
+```{r}
+
+# Median and IQR for Effort Scores
+
+data_questionnaires %>% 
+  group_by(Condition_Number) %>% 
+  summarize(Mdn = median(Score_Effort),
+            Q1 = quantile(Score_Effort, probs=0.25),
+            Q3 = quantile(Score_Effort, probs=0.75)) %>% 
+  as.data.frame()
+
+# Boxplot 
+
+data_questionnaires %>% 
+  ggplot(aes(as_factor(Condition_Number), Score_Effort)) +
+  theme_minimal()+
+  geom_boxplot(outlier.color = "red", outlier.shape = 16, outlier.size = 1) +
+  scale_x_discrete(labels = c("1" = "8", "2" = "16", "3" = "24")) +
+  scale_y_continuous(limits = c(0, 100)) +
+  labs(x = "Number of CCTV-images", y = "Effort Score")+
+  theme(
+    text = element_text(family = "serif"),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+  ) 
+
+```
+
+### Linear Mixed Effects Model for Effort
+
+```{r}
+
+# Create ranks for Effort score
+
+data_questionnaires <- data_questionnaires %>% 
+  mutate(rank_ef = rank(Score_Effort))
+
+modelef <- data_questionnaires %>% 
+  lmer(rank_ef ~ Condition_Number + Sleepiness + (1|Participant_Number), data = .)
+
+modelef
+
+# check normality by adding residuals and checking them
+
+data_questionnaires %>% 
+  add_residuals(modelef) %>% 
+  ggplot(aes(x = resid)) +
+  geom_histogram(bins=20) +
+  facet_wrap(~ Condition_Number)
+
+# Q-Q Plot
+
+data_questionnaires %>% 
+  add_residuals(modelef) %>% 
+  ggqqplot("resid", facet.by = "Condition_Number")
+
+# Shapiro-Wilk for every group 
+
+data_questionnaires %>%
+  add_residuals(modelef) %>% 
+  group_by(Condition_Number) %>%
+  shapiro_test(resid)
+
+# Compare predicted scores based on model with residuals 
+
+data_questionnaires %>% 
+  add_residuals(modelef) %>% 
+  add_predictions(modelef) %>% 
+  ggplot(aes(x = pred, y = resid)) + 
+  geom_point()
+
+# Check residuals plotted with condition on the x-axis 
+
+data_questionnaires %>% 
+  add_residuals(modelef) %>% 
+  ggplot(aes(x = Condition_Number, y = resid)) + 
+  geom_boxplot()
+
+# Check normality of random effects
+
+# Get random effects
+
+ranef_ef_values <- ranef(modelef)$Participant_Number[,1]
+ranef_ef <- data.frame(ranef_ef = ranef_ef_values)
+
+# Q-Q Plot and test of normality
+
+ranef_ef %>% 
+  ggqqplot("ranef_ef")
+
+ranef_ef %>%
+  shapiro_test(ranef_ef)
+
+# Check model 
+
+summary(modelef)
+
+# now run an ANOVA
+
+data_questionnaires %>% 
+  lmer(rank_ef ~ Condition_Number + Sleepiness + (1|Participant_Number), data = .) %>% 
+  Anova(type = 3, test.statistic = "F")
+
+# Effect size
+
+data_questionnaires %>% 
+  lmer(rank_ef ~ Condition_Number + Sleepiness + (1|Participant_Number), data = .) %>% 
+  Anova(type = 3, test.statistic = "F") %>% 
+  eta_squared(modelef)
+```
+
+## Performance
+
+### Descriptive Statistics Performance
+
+```{r}
+
+# Median and IQR for Performance Scores
+
+data_questionnaires %>% 
+  group_by(Condition_Number) %>% 
+  summarize(Mdn = median(Score_Performance),
+            Q1 = quantile(Score_Performance, probs=0.25),
+            Q3 = quantile(Score_Performance, probs=0.75)) %>% 
+  as.data.frame()
+
+# Boxplot 
+
+data_questionnaires %>% 
+  ggplot(aes(as_factor(Condition_Number), Score_Performance)) +
+  theme_minimal()+
+  geom_boxplot(outlier.color = "red", outlier.shape = 16, outlier.size = 1) +
+  scale_x_discrete(labels = c("1" = "8", "2" = "16", "3" = "24")) +
+  scale_y_continuous(limits = c(0, 100)) +
+  labs(x = "Number of CCTV-images", y = "Performance Score")+
+  theme(
+    text = element_text(family = "serif"),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+  ) 
+
+```
+
+### Linear Mixed Effects Model for Performance
+
+```{r}
+
+# Create ranks for Performance score
+
+data_questionnaires <- data_questionnaires %>% 
+  mutate(rank_pe = rank(Score_Performance))
+
+modelpe <- data_questionnaires %>% 
+  lmer(rank_pe ~ Condition_Number + Sleepiness + (1|Participant_Number), data = .)
+
+modelpe
+
+# check normality by adding residuals and checking them
+
+data_questionnaires %>% 
+  add_residuals(modelpe) %>% 
+  ggplot(aes(x = resid)) +
+  geom_histogram(bins=20) +
+  facet_wrap(~ Condition_Number)
+
+# Q-Q Plot
+
+data_questionnaires %>% 
+  add_residuals(modelpe) %>% 
+  ggqqplot("resid", facet.by = "Condition_Number")
+
+# Shapiro-Wilk for every group 
+
+data_questionnaires %>%
+  add_residuals(modelpe) %>% 
+  group_by(Condition_Number) %>%
+  shapiro_test(resid)
+
+# Compare predicted scores based on model with residuals 
+
+data_questionnaires %>% 
+  add_residuals(modelpe) %>% 
+  add_predictions(modelpe) %>% 
+  ggplot(aes(x = pred, y = resid)) + 
+  geom_point()
+
+# Check residuals plotted with condition on the x-axis 
+
+data_questionnaires %>% 
+  add_residuals(modelpe) %>% 
+  ggplot(aes(x = Condition_Number, y = resid)) + 
+  geom_boxplot()
+
+# Check normality of random effects
+
+# Get random effects
+
+ranef_pe_values <- ranef(modelpe)$Participant_Number[,1]
+ranef_pe <- data.frame(ranef_pe = ranef_pe_values)
+
+# Q-Q Plot and test of normality
+
+ranef_pe %>% 
+  ggqqplot("ranef_pe")
+
+ranef_pe %>%
+  shapiro_test(ranef_pe)
+
+# Check model 
+
+summary(modelpe)
+
+# now run an ANOVA
+
+data_questionnaires %>% 
+  lmer(rank_pe ~ Condition_Number + Sleepiness + (1|Participant_Number), data = .) %>% 
+  Anova(type = 3, test.statistic = "F")
+
+# Effect size
+
+data_questionnaires %>% 
+  lmer(rank_pe ~ Condition_Number + Sleepiness + (1|Participant_Number), data = .) %>% 
+  Anova(type = 3, test.statistic = "F") %>% 
+  eta_squared(modelpe)
+```
+
+## Frustration
+
+### Descriptive Statistics Frustration
+
+```{r}
+
+# Median and IQR for Frustration Scores
+
+data_questionnaires %>% 
+  group_by(Condition_Number) %>% 
+  summarize(Mdn = median(Score_Frustration),
+            Q1 = quantile(Score_Frustration, probs=0.25),
+            Q3 = quantile(Score_Frustration, probs=0.75)) %>% 
+  as.data.frame()
+
+# Boxplot 
+
+data_questionnaires %>% 
+  ggplot(aes(as_factor(Condition_Number), Score_Frustration)) +
+  theme_minimal()+
+  geom_boxplot(outlier.color = "red", outlier.shape = 16, outlier.size = 1) +
+  scale_x_discrete(labels = c("1" = "8", "2" = "16", "3" = "24")) +
+  scale_y_continuous(limits = c(0, 100)) +
+  labs(x = "Number of CCTV-images", y = "Frustration Score")+
+  theme(
+    text = element_text(family = "serif"),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+  ) 
+
+```
+
+### Linear Mixed Effects Model for Frustration
+
+```{r}
+
+# Create ranks for Frustration score
+
+data_questionnaires <- data_questionnaires %>% 
+  mutate(rank_fr = rank(Score_Frustration))
+
+modelfr <- data_questionnaires %>% 
+  lmer(rank_fr ~ Condition_Number + Sleepiness + (1|Participant_Number), data = .)
+
+modelfr
+
+# Check normality by adding residuals and checking them
+
+data_questionnaires %>% 
+  add_residuals(modelfr) %>% 
+  ggplot(aes(x = resid)) +
+  geom_histogram(bins=20) +
+  facet_wrap(~ Condition_Number)
+
+# Q-Q Plot
+
+data_questionnaires %>% 
+  add_residuals(modelfr) %>% 
+  ggqqplot("resid", facet.by = "Condition_Number")
+
+# Shapiro-Wilk for every group 
+
+data_questionnaires %>%
+  add_residuals(modelfr) %>% 
+  group_by(Condition_Number) %>%
+  shapiro_test(resid)
+
+# Compare predicted scores based on model with residuals 
+
+data_questionnaires %>% 
+  add_residuals(modelfr) %>% 
+  add_predictions(modelfr) %>% 
+  ggplot(aes(x = pred, y = resid)) + 
+  geom_point()
+
+# Check residuals plotted with condition on the x-axis 
+
+data_questionnaires %>% 
+  add_residuals(modelfr) %>% 
+  ggplot(aes(x = Condition_Number, y = resid)) + 
+  geom_boxplot()
+
+# Check normality of random effects
+
+# Get random effects
+
+ranef_fr_values <- ranef(modelfr)$Participant_Number[,1]
+ranef_fr <- data.frame(ranef_fr = ranef_fr_values)
+
+# Q-Q Plot and test of normality
+
+ranef_fr %>% 
+  ggqqplot("ranef_fr")
+
+ranef_fr %>%
+  shapiro_test(ranef_fr)
+
+# Check model 
+
+summary(modelfr)
+
+# now run an ANOVA
+
+data_questionnaires %>% 
+  lmer(rank_fr ~ Condition_Number + Sleepiness + (1|Participant_Number), data = .) %>% 
+  Anova(type = 3, test.statistic = "F")
+
+# Effect size
+
+data_questionnaires %>% 
+  lmer(rank_fr ~ Condition_Number + Sleepiness + (1|Participant_Number), data = .) %>% 
+  Anova(type = 3, test.statistic = "F") %>% 
+  eta_squared(modelfr)
+```
