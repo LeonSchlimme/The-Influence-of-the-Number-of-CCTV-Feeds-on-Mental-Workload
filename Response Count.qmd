@@ -1,0 +1,131 @@
+---
+title: "Response Rate"
+format: html
+---
+
+# Response Count Analysis
+
+## Libraries
+
+```{r}
+library(tidyverse)
+library(knitr)
+library(rstatix)
+library(ggpubr)
+library(readxl)
+library(Matrix)
+library(lme4)
+library(modelr)
+library(lmerTest)
+library(performance)
+```
+
+## Data Import and Cleaning
+
+```{r}
+data_response <- read_xlsx("D:/VHP files/eyetracking data/Excel sheets/Eye Tracking Analysis.xlsx", sheet = "Responses")
+
+# Removal of unnecessary columns
+
+data_response <- data_response %>% 
+  select (-"Notes") %>% 
+  rename(Response = Reacted)
+```
+
+## Analysis of Response Count 
+
+### Prepare Data for Response Count Analysis
+
+```{r}
+
+# Filter data of Incident 7 and Recording 1 for Participant 47 before calculating response rate.
+
+filtered_response_data <- data_response %>% 
+  filter(!(
+    (Incident == "7")|
+    (Participant_Number == "47" & Video == "A1")))
+
+### Calculation of response rate metric
+
+filtered_response_data <- filtered_response_data %>%
+  group_by(Participant_Number, Condition_Number) %>%
+  mutate(
+    response_rate = sum(Response == 1, na.rm = TRUE) / n()  
+  ) %>%
+  ungroup()
+
+# Add Merged Data
+
+merged_data <-read.csv("Merged Data.csv")
+
+full_data_rr <- merge(merged_data, filtered_response_data, by = c("Participant_Number", "Condition_Number"), all = TRUE)
+glimpse(full_data_rr)
+
+full_data_rr <- full_data_rr %>% 
+  mutate(
+    Participant_Number = as.character(Participant_Number),
+    Condition_Number = as.factor(Condition_Number),
+    Experiment_Location = as.factor(Experiment_Location),
+    Participant_Number = case_when(
+      Participant_Number == "3" ~ "03",
+      Participant_Number == "7" ~ "07",
+      # Rest of numbers stay the same
+      TRUE ~ Participant_Number),
+    Response = as.numeric(Response)) %>% 
+  filter(!(Participant_Number == "47" & Video == "A1"))
+    
+glimpse(full_data_rr)
+
+```
+
+### Descriptive Statistics
+
+```{r}
+
+# Mean and SD, Percent of perfect response rate
+
+full_data_rr %>% 
+  group_by(Condition_Number) %>% 
+  summarize(
+    Mean = mean(Response, na.rm = TRUE),
+    SD = sd(Response, na.rm = TRUE),
+    percent_perfect_response_rate = sum(response_rate == 1, na.rm = TRUE) / sum(!is.na(response_rate)) * 100, 
+    n = sum(!is.na(response_rate))) %>% 
+  as.data.frame()
+
+```
+
+### Linear Mixed Effects Model Response Count
+
+```{r}
+
+modelrr <- glmer(Response ~ Condition_Number + Sleepiness + (1 | Participant_Number), 
+                 data = full_data_rr, 
+                 family = binomial,
+                 control = glmerControl(optimizer = "bobyqa"))
+
+# random effects normality
+
+ranef_rr_values<- ranef(modelrr)$Participant_Number[,1]
+ranef_rr <- data.frame(ranef_rr = ranef_rr_values)
+
+ranef_rr %>% 
+  ggplot(aes(x = ranef_rr)) +
+  geom_histogram(bins=20) 
+
+ranef_rr %>% 
+  ggqqplot("ranef_rr")
+
+ranef_rr %>%
+  shapiro_test(ranef_rr)
+
+# Likelihood ratio test to check whether condition number increases model fit. 
+
+modelrr <- glmer(Response ~ Condition_Number + Sleepiness + (1 | Participant_Number), 
+                 data = full_data_rr, 
+                 family = binomial,
+                 control = glmerControl(optimizer = "bobyqa"))
+
+drop1(modelrr, test = "Chisq")
+
+```
