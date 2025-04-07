@@ -1,0 +1,233 @@
+---
+title: "Response Time"
+format: html
+---
+
+# Response Time Analysis
+
+## Libraries
+
+```{r}
+library(tidyverse)
+library(knitr)
+library(rstatix)
+library(ggpubr)
+library(readxl)
+library(Matrix)
+library(lme4)
+library(lmerTest)
+library(car)
+library(effectsize)
+library(modelr)
+```
+
+## Data Import and Cleaning
+
+```{r}
+data_response <- read_xlsx("D:/VHP files/eyetracking data/Excel sheets/Eye-tracking analysis results.xlsx", sheet = "Responses")
+
+data_response <- data_response %>% 
+  select (-"Notes") %>% 
+  rename(Response = Reacted)
+
+
+
+# Filter data of incidents that did not have sufficient quality before analysis.
+
+
+# Incidents with insufficient quality are manually checked
+
+file_paths <- list.files(path=c("D:/VHP files/eyetracking data/Pupil diameter data TOI/First_Incident", 
+                                "D:/VHP files/eyetracking data/Pupil diameter data TOI/Second_Incident", 
+                                "D:/VHP files/eyetracking data/Pupil diameter data TOI/Third_Incident"), 
+                         pattern = "*.tsv", full.names = TRUE)
+
+sample_rates_TOI <- list()
+
+for (file in file_paths) {
+  
+  D_sample_TOI <- read_tsv(file)
+
+  D_sample_TOI <- D_sample_TOI %>% 
+    select(-"Computer timestamp", -"Sensor") %>% 
+    rename(`Pupil_diameter_left` = `Pupil diameter left`, 
+           `Pupil_diameter_right` = `Pupil diameter right`, 
+           `Pupil_diameter_filtered` = `Pupil diameter filtered`, 
+           Recording_timestamp = `Recording timestamp`)
+
+  sample_rate_TOI <- D_sample_TOI %>%
+    summarize(non_NA_percent = 100 - mean(is.na(Pupil_diameter_filtered)) * 100)
+ 
+  folder_name <- basename(dirname(file))
+ 
+  file_name <- substr(tools::file_path_sans_ext(basename(file)), 
+                      nchar(tools::file_path_sans_ext(basename(file))) - 4, 
+                      nchar(tools::file_path_sans_ext(basename(file))))
+
+  new_name <- paste(folder_name, file_name, sep = "_")
+  
+  sample_rates_TOI[[new_name]] <- sample_rate_TOI
+}
+
+sample_rates_TOI
+
+#Organize sample rates into table 
+
+sample_rate_TOI_table <- tibble(
+  File = names(sample_rates_TOI),
+  Sample_Rate = unlist(sample_rates_TOI)
+  )
+sample_rate_TOI_table
+```
+
+### Response Data
+
+```{r}
+
+# Filter data for incidents with insufficient recording quality
+
+glimpse(data_response)
+data_response <- data_response %>% 
+  mutate(Incident = as.character(Incident),
+         Participant_Number = as.character(Participant_Number))
+
+filtered_response_data <- data_response %>% 
+  filter(!(
+    (Participant_Number == "21" & Video == "A2") |
+    (Participant_Number == "75" & Video == "C1" & Incident == "5") |
+    (Participant_Number == "47" & Video == "C3" & Incident == "9") |
+    (Participant_Number == "42" & Video == "C2" & Incident == "5") |
+    (Participant_Number == "60" & Video == "C3" & Incident == "1") |
+    (Participant_Number == "60" & Video == "A2" & Incident == "2") |
+    (Participant_Number == "3" & Video == "C2" & Incident == "1") |
+    (Incident == "7")
+  ))
+
+```
+
+### Merged Data
+
+```{r}
+
+merged_data <- read.csv("Merged Data.csv")
+
+full_data_rt <- merge(merged_data, filtered_response_data, by = c("Participant_Number", "Condition_Number"), all = TRUE)
+
+full_data_rt <- full_data_rt %>% 
+  mutate(
+    Participant_Number = as.factor(Participant_Number),
+    Condition_Number = as.factor(Condition_Number),
+    Experiment_Location = as.factor(Experiment_Location),
+    Incident = as.character(Incident),
+    Participant_Number = case_when(
+      Participant_Number == "3" ~ "03",
+      Participant_Number == "7" ~ "07",
+      # make sure the rest of the numbers stay the same
+      TRUE ~ Participant_Number),
+    RT = RT/1000+1.163) %>% 
+    drop_na(RT)
+
+glimpse(full_data_rt)
+
+```
+
+## Data Analysis
+
+### Descriptive Statistics
+
+```{r}
+
+# Median and IQR
+
+full_data_rt %>% 
+  group_by(Condition_Number) %>% 
+  summarize(Mdn = median(RT, na.rm = TRUE),
+            Q1 = quantile(RT, probs = 0.25, na.rm = TRUE),
+            Q3 = quantile(RT, probs = 0.75, na.rm = TRUE),
+            n = sum(!is.na(RT))) %>% 
+  as.data.frame()
+
+# Boxplot 
+
+full_data_rt %>% 
+  ggplot(aes(Condition_Number, RT)) +
+  theme_minimal() +
+  geom_boxplot(outlier.color = "red", outlier.shape = 16, outlier.size = 1) +
+  scale_x_discrete(labels = c("1" = "8", "2" = "16", "3" = "24")) +
+  labs(x = "Number of CCTV-images",y = "Response time (s)") +
+  theme(
+    text = element_text(family = "serif"),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    ) 
+
+```
+
+### Linear Mixed Model Response Time
+
+```{r}
+
+modelrt_log <- full_data_rt %>% 
+  lmer(log(RT) ~ Condition_Number + Sleepiness #+ Experiment_Location 
+       + (1|Participant_Number), data = .)
+
+modelrt_log
+
+# Check normality by adding residuals and checking them
+
+full_data_rt %>% 
+  add_residuals(modelrt_log) %>% 
+  ggplot(aes(x = resid)) +
+  geom_histogram(bins=20) +
+  # facet wrap is needed when checking residuals for each subgroup
+  facet_wrap(~ Condition_Number)
+
+# Q-Q Plot 
+
+full_data_rt %>% 
+  add_residuals(modelrt_log) %>% 
+  ggqqplot("resid", facet.by = "Condition_Number")
+
+# Predicted blink rates vs. residuals 
+
+full_data_rt %>% 
+  add_residuals(modelrt_log) %>% 
+  add_predictions(modelrt_log) %>% 
+  ggplot(aes(x = pred, y = resid)) + 
+  geom_point()
+
+# Residuals and condition 
+
+full_data_rt %>% 
+  add_residuals(modelrt_log) %>% 
+  ggplot(aes(x = Condition_Number, y = resid)) + 
+  geom_boxplot()
+
+# Check normality of random effects
+
+ranef_rt_values<- ranef(modelrt_log)$Participant_Number[,1]
+ranef_rt <- data.frame(ranef_rt = ranef_rt_values)
+
+ranef_rt %>% 
+  ggplot(aes(x = ranef_rt)) +
+  geom_histogram() 
+
+ranef_rt %>% 
+  ggqqplot("ranef_rt")
+
+ranef_rt %>%
+  shapiro_test(ranef_rt)
+
+# ANOVA
+
+Anova(modelrt_log, type = 3, test.statistic = "F")
+
+# Effect Size
+
+eta_squared(modelrt_log)
+
+```
