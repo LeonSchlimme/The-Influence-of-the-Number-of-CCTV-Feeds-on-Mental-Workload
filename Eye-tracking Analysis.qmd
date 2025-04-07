@@ -1,0 +1,498 @@
+---
+title: "Test Project Blink rate"
+---
+
+# Eye-tracking Analysis
+
+## Libraries
+
+```{r}
+library(tidyverse)
+library(knitr)
+library(rstatix)
+library(ggpubr)
+library(readxl)
+library(Matrix)
+library(lme4)
+library(modelr)
+library(lmerTest)
+library(car)
+library(effectsize)
+```
+
+## Analysis of Eye-tracking Metrics for all Recordings
+
+Pupillometry and blink rate analysis were conducted based on the same data. For this, the blink rate calculations were generalized for all recordings.
+
+```{r}
+
+# Create vector of file paths
+
+file_paths <- list.files(path=c("D:/VHP files/eyetracking data/Pupil diameter data for all/All"), pattern = "*.tsv", full.names = TRUE)
+
+# Create lists in which relevant metrics will be stored
+
+blink_rates <- list()
+num_blinks <- list()  
+recording_times <- list()
+avg_pupil_diameter <- list()
+sample_rates <- list()
+
+# Open a loop in which each file is analyzed
+
+for (file in file_paths) {
+  
+# Create dataframe and edit columns 
+  
+D_general <- read_tsv(file)
+  
+D_general <- D_general %>% 
+  select (-"Computer timestamp", -"Sensor") %>% 
+  rename(Pupil_diameter_left = `Pupil diameter left`,   
+         Pupil_diameter_right = `Pupil diameter right`, 
+         Pupil_diameter_filtered = `Pupil diameter filtered`, 
+         Recording_timestamp = `Recording timestamp`)
+
+# Use rle to group and count blinks
+
+blinks_general <- D_general %>%
+  mutate(group = with(rle(is.na(Pupil_diameter_filtered)), 
+                 rep(seq_along(lengths), lengths))) %>%
+  group_by(group) %>% 
+   # find out the lengths of each sequence of consecutive values
+  summarise(length = n(),
+            # is the group an NA group?
+            is_na = first(is.na(Pupil_diameter_filtered))) %>%
+  # Only keep NA groups with length 3-20 (for min 60, and max 600 ms, each point is 20 ms apart)
+  filter(is_na == TRUE, length > 3, length < 20) %>% 
+  # counts how many of these groups exist (each is a blink)
+  nrow()                                             
+
+# Calculate recording length in min
+
+length_general <- D_general %>% 
+  summarise(recording_length = (max(Recording_timestamp) -                          min(Recording_timestamp))/60000) %>%
+  pull(recording_length)
+
+# Calculate blink rate by dividing the number of blinks by recording length 
+
+rate_general <- blinks_general/length_general
+
+# Calculate average pupil diameter by averaging the mean of both eyes
+
+avg_diameter <- mean(D_general$Pupil_diameter_filtered, na.rm = TRUE)
+
+# Calculate sample rate
+
+sample_rate <- D_general %>%
+    summarise(non_NA_percent = 100 -                                                  mean(is.na(Pupil_diameter_filtered)) * 100)
+
+# Extract the file name without extension
+
+file_name <- tools::file_path_sans_ext(basename(file))
+  
+# Store the result in the list 
+
+blink_rates[[file_name]] <- rate_general
+num_blinks[[file_name]] <- blinks_general
+recording_times[[file_name]] <- length_general
+avg_pupil_diameter[[file_name]] <- avg_diameter
+sample_rates[[file_name]] <- sample_rate
+
+# End the loop
+
+}
+
+```
+
+### Data Preparation
+
+```{r}
+
+# Organize metrics into a table
+
+results_table <- tibble(
+  File = names(blink_rates),
+  Blink_Rate = unlist(blink_rates),
+  Num_Blinks = unlist(num_blinks),
+  Recording_Time = unlist(recording_times),
+  Avg_Pupil_Diameter = unlist(avg_pupil_diameter),
+  Sample_Rate = unlist(sample_rates))
+
+# Add condition and participant number variables to table
+
+results_table <- results_table %>%
+  mutate(
+    Participant_Number = str_sub(File, 1, 2),
+    Condition_Number = as.factor(str_sub(File, 5, 5)))
+
+glimpse(results_table)
+
+```
+
+### Merged Data
+
+A dataframe containing the eye-tracking data is combined with a dataframe containing questionnaire data for further analysis.
+
+```{r}
+
+# Reading questionnaire data
+
+questionnaire_data_et <- read.csv("Questionnaire_Data.csv")
+
+glimpse(questionnaire_data_et)
+
+questionnaire_data_et <- questionnaire_data_et %>%
+  mutate(Participant_Number = as.character(Participant_Number)) %>%
+  # fix participant numbers to be consistent with other numbers
+  mutate(
+    Participant_Number = case_when(
+      Participant_Number == "3" ~ "03",
+      Participant_Number == "7" ~ "07",
+      # make sure the rest of the numbers stay the same
+      TRUE ~ Participant_Number),
+    Condition_Number = as.factor(Condition_Number),
+    Experiment_Location = as.factor(Experiment_Location))
+
+glimpse(results_table)
+glimpse(questionnaire_data_et)
+  
+# Now merge the questionnaire data with the eye-tracking results
+
+merged_data <- merge(results_table, questionnaire_data_et, by = c("Participant_Number", "Condition_Number"), all = TRUE)
+
+glimpse(merged_data)
+
+# Save this data frame for future analysis
+
+write.csv(merged_data, "Merged Data.csv", row.names = FALSE)
+
+```
+
+## Analysis of Blink Rates
+
+### Data Preparation for Blink Rate Analysis
+
+To know which recordings have to be excluded, sample rate is verified. Some recordings are then excluded.
+
+```{r}
+
+# Create bar plot to see which sample rates are too low
+
+merged_data %>%
+  # filter for NA in files, as trial 1 for part. 47 was lost. 
+  filter(!is.na(File)) %>% 
+  ggplot(aes(x = reorder(File, Sample_Rate), y = Sample_Rate)) +
+  geom_col(width = 0.2, fill = "gray40") +  
+  geom_hline(yintercept = 80, linetype = "dashed", color = "red", size = 0.5) + 
+  labs(x = "Recording",
+       y = "Gaze Sample Rate (%)") +
+  coord_flip() +  
+  theme_minimal() +
+  scale_y_discrete(expand = c(0.1, 0))+
+  theme(
+    text = element_text(family = "serif"),
+    axis.title.x = element_text(size = 8),
+    axis.title.y = element_text(size = 8),
+    axis.text.y = element_text(size = 4),
+    axis.text.x = element_text(size = 4), 
+    panel.grid = element_blank()
+    ) 
+
+# 21_A2, 75_B2 and 07_A2 have insufficient gaze sample rates. They are excluded.
+
+filtered_results_blinkrate <- merged_data %>%
+  filter(!File %in% c("21_A2", "07_A2", "75_B2"))
+
+```
+
+### Descriptive Statistics for Blink Rate
+
+```{r}
+
+# Median and IQR for Blink Rate
+
+filtered_results_blinkrate %>% 
+  group_by(Condition_Number) %>% 
+  summarize(Mdn = median(Blink_Rate, na.rm = TRUE),
+            Q1 = quantile(Blink_Rate, probs=0.25, na.rm = TRUE),
+            Q3 = quantile(Blink_Rate, probs=0.75, na.rm = TRUE)) %>% 
+  as.data.frame()
+
+# Boxplot 
+
+filtered_results_blinkrate %>% 
+  ggplot(aes(as_factor(Condition_Number), Blink_Rate)) +
+  theme_minimal()+
+  geom_boxplot(outlier.color = "red", outlier.shape = 16, outlier.size = 1) +
+  scale_x_discrete(labels = c("1" = "8", "2" = "16", "3" = "24")) +
+  labs(x = "Number of CCTV-images",y = "Blink rate")+
+  theme(
+    text = element_text(family = "serif"),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    ) 
+
+```
+
+### Outlier Removal
+
+```{r}
+
+filtered_results_blinkrate <- merged_data %>%
+  filter(!File %in% c("21_A2", "07_A2", "75_B2", "36_A2"))
+
+```
+
+### Descriptive Statistics for Blink Rate Without Outlier
+
+```{r}
+
+# Median and IQR
+
+filtered_results_blinkrate %>% 
+  group_by(Condition_Number) %>% 
+  summarize(Mdn = median(Blink_Rate, na.rm = TRUE),
+            Q1 = quantile(Blink_Rate, probs=0.25, na.rm = TRUE),
+            Q3 = quantile(Blink_Rate, probs=0.75, na.rm = TRUE),
+            Count = n()) %>% 
+  as.data.frame()
+
+# Boxplot 
+
+filtered_results_blinkrate %>% 
+  ggplot(aes(x=factor(Condition_Number, levels = c(1, 2, 3)), Blink_Rate)) +
+  theme_minimal()+
+  geom_boxplot(outlier.color = "red", outlier.shape = 16, outlier.size = 1) +
+  scale_x_discrete(labels = c("1" = "8", "2" = "16", "3" = "24")) +
+  labs(x = "Number of CCTV-images",y = "Blink rate")+
+  theme(
+    text = element_text(family = "serif"),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank()
+    ) 
+
+```
+
+### Linear Mixed Effects Model Blink Rate
+
+```{r}
+
+modelblink <- filtered_results_blinkrate %>% 
+  lmer(Blink_Rate~Condition_Number + Sleepiness #+ Experiment_Location 
+       + (1|Participant_Number), data = .)
+
+modelblink 
+
+# Check normality by adding residuals and checking them
+
+filtered_results_blinkrate %>% 
+  add_residuals(modelblink) %>% 
+  ggplot(aes(x = resid)) +
+  geom_histogram(bins=20) +
+  # facet wrap is needed when checking residuals for each subgroup
+  facet_wrap(~ Condition_Number)
+
+# Q-Q Plot 
+
+filtered_results_blinkrate %>% 
+  add_residuals(modelblink) %>% 
+  ggqqplot("resid", facet.by = "Condition_Number")
+
+# Shapiro-Wilk for every group 
+
+filtered_results_blinkrate %>%
+  add_residuals(modelblink) %>% 
+  group_by(Condition_Number) %>%
+  shapiro_test(resid)
+
+# Compare predicted blink rates based on model with residuals 
+
+filtered_results_blinkrate %>% 
+  add_residuals(modelblink) %>% 
+  add_predictions(modelblink) %>% 
+  ggplot(aes(x = pred, y = resid)) + 
+  geom_point()
+
+# Check residuals plotted with condition on the x-axis 
+
+filtered_results_blinkrate %>% 
+  add_residuals(modelblink) %>% 
+  ggplot(aes(x =Condition_Number, y = resid)) + 
+  geom_boxplot()
+
+# Check normality of random effects
+
+# get random effects
+
+ranef_blink_values <- ranef(modelblink)$Participant_Number[,1]
+ranef_blink <- data.frame(ranef_blink = ranef_blink_values)
+
+# Q-Q Plot and test of normality
+
+ranef_blink %>% 
+  ggqqplot("ranef_blink")
+
+ranef_blink %>%
+  shapiro_test(ranef_blink)
+
+# Check model
+
+summary(modelblink)
+
+# Now run an ANOVA
+
+Anova(modelblink, type = 3, test.statistic = "F") 
+
+# Effect size
+
+eta_squared(modelblink)
+
+
+```
+
+## Analysis of Pupil Diameter
+
+### Data Preparation for Pupil Diameter Analysis
+
+```{r}
+
+# Data below the threshold
+
+filtered_results_pupil <- merged_data %>%
+  filter(!File %in% c("21_A2", "07_A2", "75_B2"))
+
+```
+
+### Descriptive Statistics for Pupil Diameter
+
+```{r}
+
+# Median and IQR for pupil diameter
+
+filtered_results_pupil %>% 
+  group_by(Condition_Number) %>% 
+  summarize(Mdn = median(Avg_Pupil_Diameter, na.rm = TRUE),
+            Q1 = quantile(Avg_Pupil_Diameter, probs=0.25, na.rm = TRUE),
+            Q3 = quantile(Avg_Pupil_Diameter, probs=0.75, na.rm = TRUE),
+            n = n()) %>% 
+  as.data.frame()
+
+# Boxplot 
+
+filtered_results_pupil %>% 
+  ggplot(aes(as_factor(Condition_Number), Avg_Pupil_Diameter)) +
+  theme_minimal()+
+  geom_boxplot(outlier.color = "red", outlier.shape = 16, outlier.size = 1) +
+  scale_x_discrete(labels = c("1" = "8", "2" = "16", "3" = "24")) +
+  labs(x = "Number of CCTV-images",y = "Pupil diameter (mm)")+
+  theme(
+    text = element_text(family = "serif"),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    ) 
+
+```
+
+### Linear Mixed Model Pupil Diameter
+
+```{r}
+
+modelpupil <- filtered_results_pupil %>% 
+  lmer(Avg_Pupil_Diameter ~ Condition_Number + Sleepiness #+ Experiment_Location 
+       + (1|Participant_Number), data = .)
+modelpupil
+
+# check normality
+
+filtered_results_pupil %>% 
+  add_residuals(modelpupil) %>% 
+  ggplot(aes(x = resid)) +
+  geom_histogram(bins=20) +
+  # facet wrap is needed when checking residuals for each subgroup
+  facet_wrap(~ Condition_Number)
+
+# Q-Q Plot 
+
+filtered_results_pupil %>% 
+  add_residuals(modelpupil) %>% 
+  ggqqplot("resid", facet.by = "Condition_Number")
+
+# Shapiro-Wilk for every group 
+
+filtered_results_pupil %>%
+  add_residuals(modelpupil) %>% 
+  group_by(Condition_Number) %>%
+  shapiro_test(resid)
+
+# Compare predicted pupil diameters with residuals 
+
+filtered_results_pupil %>% 
+  add_residuals(modelpupil) %>% 
+  add_predictions(modelpupil) %>% 
+  ggplot(aes(x = pred, y = resid)) + 
+  geom_point()
+
+# Check residuals plotted with number of feeds as x axis 
+
+filtered_results_pupil %>% 
+  add_residuals(modelpupil) %>% 
+  ggplot(aes(x = Condition_Number, y = resid)) + 
+  geom_boxplot()
+
+# Check normality of random effects
+
+# Get random effects
+
+ranef_pupil_values<- ranef(modelpupil)$Participant_Number[,1]
+ranef_pupil <- data.frame(ranef_pupil = ranef_pupil_values)
+
+# Q-Q Plot and test for normality
+
+ranef_pupil %>% 
+  ggqqplot("ranef_pupil")
+
+ranef_pupil %>%
+  shapiro_test(ranef_pupil)
+
+summary(modelpupil)
+
+# Run ANOVA
+
+Anova(modelpupil, type = 3, test.statistic = "F")
+
+# Effect size
+
+eta_squared(modelpupil)
+
+# Post-hoc pairwise test
+
+# Means
+
+filtered_results_pupil %>%
+  group_by(Condition_Number) %>% 
+  summarise(mean = mean(Avg_Pupil_Diameter, na.rm = TRUE))
+
+# Filter out missing values
+
+filtered_results_pupil <- filtered_results_pupil %>% drop_na(Avg_Pupil_Diameter)
+
+# Test differences between means 
+
+pairwise.t.test(filtered_results_pupil$Avg_Pupil_Diameter, 
+                filtered_results_pupil$Condition_Number,  
+                p.adjust.method = 'bonferroni')
+
+```
